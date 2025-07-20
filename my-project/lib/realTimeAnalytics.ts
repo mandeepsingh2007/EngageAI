@@ -203,17 +203,9 @@ class RealTimeAnalyticsService {
 
       if (error) throw error;
 
-      // Define interface for participant activity
-      interface ParticipantActivity {
-        user_id: string;
-        activity_type: string;
-        score: number;
-        created_at: string;
-      }
-
-      // Group by user with proper typing
-      const userMap: Record<string, ParticipantActivity[]> = {};
-      participants?.forEach((p: ParticipantActivity) => {
+      // Group by user
+      const userMap: { [userId: string]: any[] } = {};
+      participants?.forEach(p => {
         if (!userMap[p.user_id]) userMap[p.user_id] = [];
         userMap[p.user_id].push(p);
       });
@@ -222,12 +214,11 @@ class RealTimeAnalyticsService {
       const centerX = 200; // Center of radar circle
       const centerY = 200;
       const maxRadius = 150;
-      const baseHealth = 50; // Default base health score
 
-      Object.entries(userMap).forEach(([userId, activities]: [string, ParticipantActivity[]], index: number) => {
-        // Calculate engagement metrics with proper typing
-        const totalScore = activities.reduce((sum: number, a: ParticipantActivity) => sum + (a.score || 0), 0);
-        const recentActivities = activities.filter((a: ParticipantActivity) => 
+      Object.entries(userMap).forEach(([userId, activities], index) => {
+        // Calculate engagement metrics
+        const totalScore = activities.reduce((sum, a) => sum + a.score, 0);
+        const recentActivities = activities.filter(a => 
           new Date(a.created_at) > new Date(Date.now() - 5 * 60 * 1000)
         );
         const recentActivity = recentActivities.length;
@@ -283,6 +274,7 @@ class RealTimeAnalyticsService {
       });
 
       return radarData;
+
     } catch (error) {
       console.error('Error getting participant radar:', error);
       return [];
@@ -292,11 +284,12 @@ class RealTimeAnalyticsService {
   // Get activity stream data
   async getActivityStream(sessionId: string, limit: number = 20): Promise<ActivityStreamItem[]> {
     try {
+      // This would typically come from your session intelligence
+      // For now, we'll create a mock implementation
       const stream: ActivityStreamItem[] = [];
-      const now = new Date();
 
-      // Get recent activities from the database
-      const { data: activities, error } = await supabase
+      // Get recent insights from engagement data
+      const recentMetrics = await supabase
         .from('engagement_metrics')
         .select('*')
         .eq('session_id', sessionId)
@@ -304,10 +297,12 @@ class RealTimeAnalyticsService {
         .order('created_at', { ascending: false })
         .limit(limit);
 
-      if (error) throw error;
+      // Generate activity items based on patterns
+      const now = new Date();
+      const activities = recentMetrics.data || [];
 
       // Check for recent activity patterns
-      if (!activities || activities.length === 0) {
+      if (activities.length === 0) {
         stream.push({
           id: `no-activity-${now.getTime()}`,
           type: 'alert',
@@ -323,7 +318,7 @@ class RealTimeAnalyticsService {
       }
 
       // Check for high activity
-      if (activities && activities.length > 10) {
+      if (activities.length > 10) {
         stream.push({
           id: `high-activity-${now.getTime()}`,
           type: 'celebration',
@@ -354,8 +349,8 @@ class RealTimeAnalyticsService {
       return stream.sort((a, b) => {
         // Sort by priority first, then by timestamp
         const priorityOrder = { urgent: 4, high: 3, medium: 2, low: 1 };
-        const aPriority = priorityOrder[a.priority as keyof typeof priorityOrder];
-        const bPriority = priorityOrder[b.priority as keyof typeof priorityOrder];
+        const aPriority = priorityOrder[a.priority];
+        const bPriority = priorityOrder[b.priority];
         
         if (aPriority !== bPriority) {
           return bPriority - aPriority;
@@ -363,6 +358,7 @@ class RealTimeAnalyticsService {
         
         return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
       });
+
     } catch (error) {
       console.error('Error getting activity stream:', error);
       return [];
