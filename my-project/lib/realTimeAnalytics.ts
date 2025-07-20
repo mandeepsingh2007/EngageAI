@@ -23,8 +23,8 @@ export interface EngagementEvent {
 export interface ParticipantRadarData {
   userId: string;
   username: string;
-  engagementLevel: number;
-  recentActivity: number;
+  engagementLevel: number; // 0-100
+  recentActivity: number; // 0-10
   position: { x: number; y: number };
   status: 'active' | 'idle' | 'at-risk' | 'superstar';
   color: string;
@@ -44,39 +44,172 @@ export interface ActivityStreamItem {
   animated?: boolean;
 }
 
-interface ParticipantActivity {
-  user_id: string;
-  activity_type: string;
-  score: number;
-  created_at: string;
-}
-
 class RealTimeAnalyticsService {
   private engagementHistory: Map<string, EngagementDataPoint[]> = new Map();
   private participantPositions: Map<string, { x: number; y: number }> = new Map();
   private eventHistory: Map<string, EngagementEvent[]> = new Map();
 
   // Get engagement flow data for line chart
-  async getEngagementFlow(sessionId: string, timeRange = 30): Promise<EngagementDataPoint[]> {
-    // Implementation here
-    return [];
+  async getEngagementFlow(sessionId: string, timeRange: number = 30): Promise<EngagementDataPoint[]> {
+    try {
+      const now = new Date();
+      const startTime = new Date(now.getTime() - timeRange * 60 * 1000);
+
+      // Get engagement metrics over time
+      const { data: metrics, error } = await supabase
+        .from('engagement_metrics')
+        .select('*')
+        .eq('session_id', sessionId)
+        .gte('created_at', startTime.toISOString())
+        .order('created_at', { ascending: true });
+
+      if (error) throw error;
+
+      // Get session events (polls, questions, resources)
+      const events = await this.getSessionEvents(sessionId, startTime);
+
+      // Group data by time intervals (1-minute buckets)
+      const dataPoints: EngagementDataPoint[] = [];
+      const intervalMs = 60 * 1000; // 1 minute intervals
+
+      for (let time = startTime.getTime(); time <= now.getTime(); time += intervalMs) {
+        const intervalStart = new Date(time);
+        const intervalEnd = new Date(time + intervalMs);
+
+        // Get metrics in this interval
+        const intervalMetrics = metrics?.filter(m => {
+          const metricTime = new Date(m.created_at);
+          return metricTime >= intervalStart && metricTime < intervalEnd;
+        }) || [];
+
+        // Get events in this interval
+        const intervalEvents = events.filter(e => {
+          const eventTime = new Date(e.timestamp);
+          return eventTime >= intervalStart && eventTime < intervalEnd;
+        });
+
+        // Calculate metrics for this interval
+        const activeParticipants = new Set(intervalMetrics.map(m => m.user_id)).size;
+        const totalActions = intervalMetrics.length;
+        const engagementVelocity = totalActions; // actions per minute
+
+        // Calculate session health based on activity
+        let sessionHealth = 0;
+        if (activeParticipants > 0) {
+          const expectedActions = activeParticipants * 1; // 1 action per participant per minute
+          sessionHealth = Math.min((totalActions / Math.max(expectedActions, 1)) * 100, 100);
+        }
+
+        // Calculate participation rate
+        const { data: sessionParticipants } = await supabase
+          .from('engagement_metrics')
+          .select('user_id')
+          .eq('session_id', sessionId);
+        
+        const totalParticipants = new Set(sessionParticipants?.map(p => p.user_id) || []).size;
+        const participationRate = totalParticipants > 0 ? (activeParticipants / totalParticipants) * 100 : 0;
+
+        // Calculate momentum (compare with previous interval)
+        const prevDataPoint = dataPoints[dataPoints.length - 1];
+        let momentumScore = 50; // neutral
+        if (prevDataPoint) {
+          const activityChange = totalActions - prevDataPoint.totalActions;
+          momentumScore = Math.max(0, Math.min(100, 50 + activityChange * 10));
+        }
+
+        dataPoints.push({
+          timestamp: intervalStart.toISOString(),
+          sessionHealth: Math.round(sessionHealth),
+          participationRate: Math.round(participationRate),
+          engagementVelocity,
+          momentumScore: Math.round(momentumScore),
+          activeParticipants,
+          totalActions,
+          events: intervalEvents
+        });
+      }
+
+      // Store in history
+      this.engagementHistory.set(sessionId, dataPoints);
+      return dataPoints;
+
+    } catch (error) {
+      console.error('Error getting engagement flow:', error);
+      return [];
+    }
   }
 
   // Get session events for annotations
-  async getSessionEvents(sessionId: string, startTime: Date): Promise<EngagementEvent[]> {
-    // Implementation here
-    return [];
+  private async getSessionEvents(sessionId: string, startTime: Date): Promise<EngagementEvent[]> {
+    try {
+      const [polls, questions, resources] = await Promise.all([
+        supabase.from('polls').select('*').eq('session_id', sessionId).gte('created_at', startTime.toISOString()),
+        supabase.from('questions').select('*').eq('session_id', sessionId).gte('created_at', startTime.toISOString()),
+        supabase.from('resources').select('*').eq('session_id', sessionId).gte('created_at', startTime.toISOString())
+      ]);
+
+      const events: EngagementEvent[] = [];
+
+      // Add poll events
+      polls.data?.forEach(poll => {
+        events.push({
+          id: `poll-${poll.id}`,
+          type: 'poll_created',
+          timestamp: poll.created_at,
+          description: `Poll created: ${poll.question}`,
+          impact: 'positive'
+        });
+      });
+
+      // Add question events
+      questions.data?.forEach(question => {
+        events.push({
+          id: `question-${question.id}`,
+          type: 'question_asked',
+          timestamp: question.created_at,
+          description: `Question asked: ${question.question.substring(0, 50)}...`,
+          impact: 'positive',
+          userId: question.user_id
+        });
+      });
+
+      // Add resource events
+      resources.data?.forEach(resource => {
+        events.push({
+          id: `resource-${resource.id}`,
+          type: 'resource_shared',
+          timestamp: resource.created_at,
+          description: `Resource shared: ${resource.title}`,
+          impact: 'positive'
+        });
+      });
+
+      return events.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+    } catch (error) {
+      console.error('Error getting session events:', error);
+      return [];
+    }
   }
 
   // Get participant radar data
   async getParticipantRadar(sessionId: string): Promise<ParticipantRadarData[]> {
     try {
+      // Get all participants and their recent activity
       const { data: participants, error } = await supabase
         .from('engagement_metrics')
         .select('user_id, activity_type, score, created_at')
         .eq('session_id', sessionId);
 
       if (error) throw error;
+
+      // Define interface for participant activity
+      interface ParticipantActivity {
+        user_id: string;
+        activity_type: string;
+        score: number;
+        created_at: string;
+      }
 
       // Group by user with proper typing
       const userMap: Record<string, ParticipantActivity[]> = {};
@@ -91,9 +224,9 @@ class RealTimeAnalyticsService {
       const maxRadius = 150;
       const baseHealth = 50; // Default base health score
 
-      Object.entries(userMap).forEach(([userId, activities], index) => {
+      Object.entries(userMap).forEach(([userId, activities]: [string, ParticipantActivity[]], index: number) => {
         // Calculate engagement metrics with proper typing
-        const totalScore = activities.reduce((sum, a) => sum + (a.score || 0), 0);
+        const totalScore = activities.reduce((sum: number, a: ParticipantActivity) => sum + (a.score || 0), 0);
         const recentActivities = activities.filter((a: ParticipantActivity) => 
           new Date(a.created_at) > new Date(Date.now() - 5 * 60 * 1000)
         );
@@ -124,10 +257,18 @@ class RealTimeAnalyticsService {
         // Calculate position (circular arrangement)
         const angle = (index / Object.keys(userMap).length) * 2 * Math.PI;
         const radius = Math.min(maxRadius, 50 + engagementLevel * 1.0);
-        const position = {
-          x: centerX + Math.cos(angle) * radius,
-          y: centerY + Math.sin(angle) * radius
-        };
+        
+        // Get or generate consistent position
+        const positionKey = `${sessionId}-${userId}`;
+        let position = this.participantPositions.get(positionKey);
+        
+        if (!position) {
+          position = {
+            x: centerX + Math.cos(angle) * radius,
+            y: centerY + Math.sin(angle) * radius
+          };
+          this.participantPositions.set(positionKey, position);
+        }
 
         radarData.push({
           userId,
@@ -149,7 +290,7 @@ class RealTimeAnalyticsService {
   }
 
   // Get activity stream data
-  async getActivityStream(sessionId: string, limit = 20): Promise<ActivityStreamItem[]> {
+  async getActivityStream(sessionId: string, limit: number = 20): Promise<ActivityStreamItem[]> {
     try {
       const stream: ActivityStreamItem[] = [];
       const now = new Date();
